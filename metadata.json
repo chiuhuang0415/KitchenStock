@@ -1,0 +1,5 @@
+{
+  "name": "KitchenStock 庫存小幫手",
+  "description": "A smart inventory management system designed for kitchen operations, tracking ingredients, braised dishes, and consumables with AI-powered restocking advice.",
+  "requestFramePermissions": []
+}
