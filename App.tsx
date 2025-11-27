@@ -1,213 +1,153 @@
-import React, { useState, useEffect } from 'react';
-import { Category, InventoryItem, AiAnalysisResult } from './types';
-import { INITIAL_INVENTORY, CATEGORY_COLORS, CATEGORY_LABELS } from './constants';
-import InventoryCard from './components/InventoryCard';
-import { generateStockAnalysis } from './services/geminiService';
-import { LayoutDashboard, Sparkles, RefreshCw, Save, RotateCcw } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import KitchenStock from './components/KitchenStock';
+import './App.css';
+
+// 庫存項目的 TypeScript 介面
+interface InventoryItem {
+  id: number;
+  '名稱': string;
+  '數量': number;
+  '單位': string;
+}
+
+// *** 您的 Apps Script Web App URL - 這是您剛剛部署成功的網址！***
+const API_URL = 'https://script.google.com/macros/s/AKfycbzrWd6NXyNq9X1Y4VDIu3GuQDAOt4R6YddfAYr8gJjNWPu7CABb-NPoljAYVqXNgiHx/exec';
+
+// 客製化 Hook：用於初次載入資料
+// 它會在組件載入時，或當 items 列表需要重新整理時，從 Apps Script API 獲取資料。
+const useInitialLoad = (setItems: (items: InventoryItem[]) => void, shouldReload: boolean) => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchInventory = async () => {
+      // 確保每次載入都將 loading 設為 true
+      setIsLoading(true); 
+      try {
+        const response = await fetch(API_URL, {
+          method: 'GET',
+          // 確保 CORS 和快取設定正確
+          cache: 'no-cache', 
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP 錯誤! 狀態碼: ${response.status}`);
+        }
+
+        const result = await response.json();
+        
+        // 檢查 Apps Script 回傳的狀態
+        if (result.status === 200) {
+          // 確保數量是數字類型
+          const processedData: InventoryItem[] = (result.data || []).map((item: any, index: number) => ({
+            id: item.id || index + 1, // 使用後端 ID，如果沒有則使用索引
+            '名稱': item['名稱'] || '',
+            '數量': Number(item['數量']) || 0, // 將數量轉換為數字，以便在前端計算
+            '單位': item['單位'] || '',
+          }));
+          setItems(processedData);
+          setError(null);
+        } else {
+          setError(`API 錯誤: ${result.message}`);
+        }
+      } catch (e) {
+        if (e instanceof Error) {
+            console.error("載入庫存資料失敗:", e.message);
+            setError("無法連線到資料庫或載入資料。請檢查網路和 API 部署狀態。錯誤詳情: " + e.message);
+        } else {
+            setError("發生未知錯誤。");
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchInventory();
+  }, [setItems, shouldReload]); // 依賴 shouldReload，當它改變時重新執行
+
+  return { isLoading, error };
+};
 
 const App: React.FC = () => {
-  const [inventory, setInventory] = useState<InventoryItem[]>(() => {
-    const saved = localStorage.getItem('kitchenStock_inventory');
-    return saved ? JSON.parse(saved) : INITIAL_INVENTORY;
-  });
+  const [items, setItems] = useState<InventoryItem[]>([]);
+  // 增加一個 state 來控制是否需要重新載入資料
+  const [shouldReload, setShouldReload] = useState(false); 
+  
+  // 重新載入資料的函式，通過改變 shouldReload 的狀態來觸發 useInitialLoad
+  const reloadData = useCallback(() => {
+    setShouldReload(prev => !prev);
+  }, []);
 
-  const [activeTab, setActiveTab] = useState<'inventory' | 'analysis'>('inventory');
-  const [analysis, setAnalysis] = useState<AiAnalysisResult>({ status: 'idle', content: '' });
+  // 呼叫 Hook 來處理資料載入
+  const { isLoading, error } = useInitialLoad(setItems, shouldReload); 
 
-  // Persist to local storage
-  useEffect(() => {
-    localStorage.setItem('kitchenStock_inventory', JSON.stringify(inventory));
-  }, [inventory]);
+  // 新增項目到 Google 試算表
+  const addItem = useCallback(async (newItem: Omit<InventoryItem, 'id'>) => {
+    // Apps Script API 只需要新增項目的資料，並且欄位名稱必須與試算表標題一致 ('名稱', '數量', '單位')
+    const itemToSend = {
+      '名稱': newItem['名稱'],
+      '數量': newItem['數量'].toString(), // 傳送給 Apps Script 時，數字需要轉換為字串
+      '單位': newItem['單位']
+    };
 
-  const handleUpdateQuantity = (id: string, quantity: number) => {
-    setInventory(prev => prev.map(item => 
-      item.id === id 
-        ? { ...item, quantity, lastUpdated: Date.now() } 
-        : item
-    ));
-  };
+    try {
+      // 發送 POST 請求到 Apps Script API
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(itemToSend),
+      });
 
-  const handleReset = () => {
-    if (confirm('確定要重置所有庫存數量為 0 嗎？此動作無法復原。')) {
-      setInventory(INITIAL_INVENTORY.map(item => ({ ...item, quantity: 0, lastUpdated: Date.now() })));
+      if (!response.ok) {
+        throw new Error('新增項目 HTTP 錯誤');
+      }
+
+      const result = await response.json();
+
+      if (result.status === 200) {
+        console.log("新增成功:", result.data);
+        // 新增成功後，觸發重新載入，讓前端顯示最新資料
+        reloadData(); 
+      } else {
+        alert(`新增失敗: ${result.message}`);
+      }
+    } catch (e) {
+      console.error("新增項目失敗:", e);
+      alert("無法新增項目。請檢查 API 連線。");
     }
-  };
+  }, [reloadData]);
+  
+  // 簡化載入和錯誤狀態的顯示
+  const displayLoading = isLoading; 
+  const displayError = error;
 
-  const handleAnalyze = async () => {
-    setAnalysis({ status: 'loading', content: '' });
-    setActiveTab('analysis');
-    const result = await generateStockAnalysis(inventory);
-    setAnalysis({ status: 'success', content: result });
-  };
+  if (displayLoading) {
+    return (
+      <div className="App">
+        <h1>廚房庫存管理</h1>
+        <div className="loading">資料載入中...</div>
+      </div>
+    );
+  }
 
-  // Group items by category
-  const groupedInventory = inventory.reduce((acc, item) => {
-    if (!acc[item.category]) acc[item.category] = [];
-    acc[item.category].push(item);
-    return acc;
-  }, {} as Record<Category, InventoryItem[]>);
-
-  // Render Markdown-like text simply (handling newlines and basic formatting)
-  const renderAnalysisContent = (text: string) => {
-    return text.split('\n').map((line, i) => {
-      const isHeader = line.startsWith('#') || line.includes('：');
-      const isListItem = line.trim().startsWith('-') || line.trim().startsWith('*') || /^\d+\./.test(line.trim());
-      
-      let className = "mb-2 text-gray-700";
-      if (line.includes('[急缺]')) className = "mb-2 text-red-600 font-bold bg-red-50 p-2 rounded";
-      else if (line.includes('[建議補貨]')) className = "mb-2 text-amber-600 font-medium";
-      else if (isHeader) className = "mb-3 mt-4 text-lg font-bold text-gray-900 border-b pb-1";
-      
-      return <div key={i} className={className}>{line}</div>;
-    });
-  };
+  if (displayError) {
+    return (
+      <div className="App">
+        <h1>廚房庫存管理</h1>
+        <div className="error-message">錯誤: {displayError}</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-20 md:pb-0">
-      {/* Header */}
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-blue-600 p-2 rounded-lg text-white">
-              <LayoutDashboard size={24} />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-gray-900">庫存小幫手</h1>
-              <p className="text-xs text-gray-500">Kitchen Inventory Tracker</p>
-            </div>
-          </div>
-          <div className="flex gap-2">
-             <button 
-              onClick={handleReset}
-              className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
-              title="重置所有庫存"
-            >
-              <RotateCcw size={20} />
-            </button>
-          </div>
-        </div>
+    <div className="App">
+      <header className="App-header">
+        <h1>廚房庫存管理</h1>
       </header>
-
-      {/* Main Content */}
-      <main className="max-w-4xl mx-auto p-4 space-y-6">
-        
-        {/* Navigation Tabs (Mobile optimized) */}
-        <div className="flex bg-white p-1 rounded-xl shadow-sm border border-gray-100">
-          <button
-            onClick={() => setActiveTab('inventory')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-semibold transition-all
-              ${activeTab === 'inventory' 
-                ? 'bg-blue-600 text-white shadow-md' 
-                : 'text-gray-500 hover:bg-gray-50'}`}
-          >
-            <LayoutDashboard size={18} />
-            庫存盤點
-          </button>
-          <button
-            onClick={() => activeTab === 'analysis' ? handleAnalyze() : setActiveTab('analysis')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-lg text-sm font-semibold transition-all
-              ${activeTab === 'analysis' 
-                ? 'bg-indigo-600 text-white shadow-md' 
-                : 'text-gray-500 hover:bg-gray-50'}`}
-          >
-            <Sparkles size={18} />
-            AI 智慧分析
-          </button>
-        </div>
-
-        {activeTab === 'inventory' && (
-          <div className="space-y-8 animate-fade-in">
-            {Object.entries(groupedInventory).map(([category, items]) => (
-              <section key={category} className="space-y-3">
-                <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border w-fit ${CATEGORY_COLORS[category as Category]}`}>
-                  <h2 className="font-bold text-sm tracking-wide">
-                    {CATEGORY_LABELS[category as Category]}
-                  </h2>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {items.map(item => (
-                    <InventoryCard 
-                      key={item.id} 
-                      item={item} 
-                      onUpdate={handleUpdateQuantity} 
-                    />
-                  ))}
-                </div>
-              </section>
-            ))}
-            
-            <div className="h-24 md:h-12"></div> {/* Spacer for floating button */}
-          </div>
-        )}
-
-        {activeTab === 'analysis' && (
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden animate-fade-in min-h-[50vh]">
-            <div className="p-6 border-b border-gray-100 bg-indigo-50/50 flex justify-between items-center">
-              <div>
-                <h2 className="text-xl font-bold text-indigo-900">智慧叫貨建議</h2>
-                <p className="text-sm text-indigo-600/80 mt-1">AI 根據目前庫存量產生的報告</p>
-              </div>
-              <button 
-                onClick={handleAnalyze}
-                disabled={analysis.status === 'loading'}
-                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors shadow-sm text-sm font-medium"
-              >
-                {analysis.status === 'loading' ? (
-                  <>
-                    <RefreshCw className="animate-spin" size={16} />
-                    分析中...
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw size={16} />
-                    重新分析
-                  </>
-                )}
-              </button>
-            </div>
-            
-            <div className="p-6">
-              {analysis.status === 'idle' && (
-                <div className="text-center py-12 text-gray-400">
-                  <Sparkles size={48} className="mx-auto mb-4 text-indigo-200" />
-                  <p>點擊上方按鈕開始分析庫存</p>
-                </div>
-              )}
-              
-              {analysis.status === 'loading' && (
-                <div className="space-y-4 animate-pulse">
-                  <div className="h-4 bg-gray-100 rounded w-3/4"></div>
-                  <div className="h-4 bg-gray-100 rounded w-1/2"></div>
-                  <div className="h-4 bg-gray-100 rounded w-5/6"></div>
-                  <div className="h-32 bg-gray-50 rounded-lg mt-6"></div>
-                </div>
-              )}
-
-              {analysis.status === 'success' && (
-                <div className="prose prose-indigo max-w-none">
-                  {renderAnalysisContent(analysis.content)}
-                </div>
-              )}
-              
-              {analysis.status === 'error' && (
-                <div className="text-center py-12 text-red-500 bg-red-50 rounded-xl">
-                  <p>發生錯誤，請稍後再試。</p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Floating Action Button for Inventory Save (Visual feedback only since it auto-saves) */}
-      {activeTab === 'inventory' && (
-        <div className="fixed bottom-6 right-6 md:hidden">
-          <div className="bg-gray-900 text-white px-4 py-3 rounded-full shadow-lg flex items-center gap-2 text-sm font-medium opacity-90 backdrop-blur-sm">
-            <Save size={16} />
-            自動儲存中
-          </div>
-        </div>
-      )}
+      {/* 將庫存資料和新增函式傳遞給子組件 */}
+      <KitchenStock items={items} onAddItem={addItem} />
     </div>
   );
 };
